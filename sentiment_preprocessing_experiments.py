@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-감성분석 전처리 실험
-배경: 원본 파이프라인에서 일부 문서가 전처리 후 빈 토큰이 되어(Empty docs) 학습/평가에 문제 발생.
-실험 요약:
-    1) debug_tokens.py로 샘플 출력하여 빈/1-token 케이스 확인.
-    2) clean_text: 'ㅋ/ㅎ' 및 'ㅜ/ㅠ' 등 단일/반복 이모티콘을 '웃음'/'울음'으로 정규화.
-    3) 정규화 토큰('웃음','울음')은 감성 신호이므로 stopwords에서 제외.
-    4) 토큰화가 완전히 비었을 때의 fallback을 추가(Okt.nouns -> regex 한글단어 -> 영문/숫자 -> single-korean).
-    5) 학습 데이터에서는 토큰이 비어버린 문서들을 드롭. 테스트 문서는 "특수" 토큰으로 대체하여 예측 가능하게 함.
-이유: '웃음' 등을 stopwords로 제거했을 때 의미 있는 감성 신호가 사라져서 빈 문서가 증가하였음.
-    : 빈 문서 자체가 노이즈가 될 수 있어서 학습 안정성을 위해 비어있는 문서를 드롭함.
-
+감성분석 실험 요약
+1) EDA: 학습 및 테스트 샘플 수와 전처리 후 실제 학습에 사용된 샘플 수, 클래스 분포, 전처리 후 빈 문서와 1-token 문서 수 계산.
+2) 전처리: 원본 파이프라인에서 일부 문서가 전처리 후 빈 토큰이 되어(Empty docs) 학습/평가에 문제 발생.
+    - debug_tokens.py로 샘플 출력하여 빈/1-token 케이스 확인.
+    - clean_text: 'ㅋ/ㅎ' 및 'ㅜ/ㅠ' 등 단일/반복 이모티콘을 '웃음'/'울음'으로 정규화.
+    - 정규화 토큰('웃음','울음')은 감성 신호이므로 stopwords에서 제외.
+    - 토큰화가 완전히 비었을 때의 fallback을 추가(Okt.nouns -> regex 한글단어 -> 영문/숫자 -> single-korean).
+    - 학습 데이터에서는 토큰이 비어버린 문서들을 드롭. 테스트 문서는 "특수" 토큰으로 대체하여 예측 가능하게 함.
+    *이유: '웃음' 등을 stopwords로 제거했을 때 의미 있는 감성 신호가 사라져서 빈 문서가 증가하였음.
+         : 빈 문서 자체가 노이즈가 될 수 있어서 학습 안정성을 위해 비어있는 문서를 드롭함.
+3) 표현: TF-IDF + Word2Vec 평균 벡터의 결합 표현 사용.
+4) 모델: LogisticRegression (LC2, C=1.0, class_weight='balanced' 적용) 및 RandomForestClassifier 사용
+5) 평가: StratifiedKFold CV (5-fold)를 사용해서 평균 CV 정확도와 macro-F1, class-wise recall로 모델 조합 평가.
+6) 개선: class_weight='balanced' 적용 및 C 그리드(0.01,0.1,1,10) 튜닝 후 기본값 logreg_C=1.0 채택함
 """
+
 from __future__ import annotations
 import os
 import re
@@ -67,7 +71,8 @@ def load_table(path: str) -> pd.DataFrame:
         lines = [l.rstrip("\n") for l in f]
     return pd.DataFrame({"text": lines})
 
-
+# 라벨 정규화 함수: positive, pos, 긍정 -> 1; negative, neg, 부정 -> 0로 변환.
+# 숫자형 라벨(0,1)도 그대로 int로 변환.
 def normalize_labels(s: pd.Series) -> pd.Series:
     mapping = {
         "positive": 1, "pos": 1, "긍정": 1, "1": 1,
@@ -78,6 +83,12 @@ def normalize_labels(s: pd.Series) -> pd.Series:
         return s.astype(int)
     return s.astype(str).map(lambda x: mapping.get(x.strip().lower(), x)).astype(int)
 
+    """한국어 전처리 및 tokenizer 클래스
+    - clean_text: 이모티콘 정규화, URL 제거, 과도한 구두점/반복문자 축소, 특수문자 제거.
+    - tokenize: Okt 기반 형태소 분석 및 불용어 제거, 빈 토큰 시 fallback 순서로 복구함.
+    - tokenize_nouns: Okt.nouns 기반 명사 추출 및 불용어 제거, 빈 토큰 시 tokenize()로 fallback함.
+    - negation_transform: '안'/'못' 등의 부정 표현을 강화함.
+    """
 
 class KoreanPreprocessor:
     def __init__(self, extra_stopwords: List[str] = None):
@@ -250,9 +261,6 @@ def evaluate_variant(name: str,
     X_w2v_csr = csr_matrix(X_w2v)
     X_concat = hstack([X_tfidf, X_w2v_csr])
 
-    """
-    기존 코드: lr = LogisticRegression(max_iter=1000, random_state=seed)
-    """
     lr = LogisticRegression(max_iter=1000, random_state=seed, C=logreg_C,
                              class_weight='balanced' if use_balanced else None)
     rf = RandomForestClassifier(n_estimators=150, random_state=seed, n_jobs=-1)
@@ -297,6 +305,7 @@ def main(args):
     train_df = load_table(args.train)
     test_df = load_table(args.test)
 
+    # EDA 요약: 학습 및 테스트 샘플 수, 라벨 컬럼 파악.
     cols_train = [c for c in train_df.columns]
     lowered = [c.lower() for c in cols_train]
     if "document" in lowered:
@@ -375,6 +384,7 @@ def main(args):
         print(f"Variant description: {desc}")
         print(f"  Samples (after drop): {total_docs}, Empty docs: {empty_docs}, 1-token docs: {one_token_docs}, Avg tokens per sample: {avg_len:.2f}")
 
+        # 평가(교차 검증) 및 피처/모델 생성.
         res = evaluate_variant(vname, train_tokens, train_joined, y_variant, seed=args.seed,
                                w2v_dim=args.w2v_dim, w2v_min_count=args.w2v_min_count, cv_folds=args.cv_folds,
                                use_balanced=args.use_balanced, logreg_C=args.logreg_C if hasattr(args, 'logreg_C') else 1.0)
@@ -426,7 +436,7 @@ def main(args):
     print(f"Overall best variant: {best_variant} with model {best_model_name} (acc={overall_best['best_mean_acc']:.4f})")
     chosen = artifacts[best_variant]
 
-    # --- 대체 시작: final model 훈련부 (main 함수 내부) ---
+    # ---final model 훈련부 (main 함수 내부) ---
     print("Training final model on chosen variant's filtered training set...")
     X_final = None
     y_final = chosen["y_variant"]
@@ -450,7 +460,7 @@ def main(args):
             n_jobs=-1
         )
     else:
-    # tfidf_w2v_logreg (concat) or other combined cases
+    # 테스트 셋 변환 및 예측
         X_final = chosen["X_concat"]
         final_clf = LogisticRegression(
             max_iter=1000,
@@ -484,6 +494,7 @@ def main(args):
     out_df.to_csv(out_path, sep="\t", index=False, encoding="utf-8")
     print("Saved predictions to:", out_path)
 
+    # 모델 및 아티팩트 저장
     if args.save_model:
         model_artifacts = {
             "final_model": final_clf,
@@ -542,5 +553,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_balanced", action="store_true", help="If set, use class_weight='balanced' for LogisticRegression.")
     parser.add_argument("--logreg_C", type=float, default=1.0, help="LogisticRegression C (inverse regularization).")
     parser.add_argument("--rf_estimators", type=int, default=200, help="n_estimators for RandomForest used in final fit.")
+    parser.add_argument("--only_test_output", action="store_true",
+                    help="If set, suppress intermediate prints and show only final test output.")
     args = parser.parse_args()
     main(args)
