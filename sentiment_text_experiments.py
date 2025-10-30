@@ -555,7 +555,11 @@ if __name__ == "__main__":
     parser.add_argument("--w2v_dim", type=int, default=100, help="Word2Vec vector dim.")
     parser.add_argument("--w2v_min_count", type=int, default=1, help="Word2Vec min_count.")
     parser.add_argument("--cv_folds", type=int, default=5, help="CV folds for evaluation.")
-    parser.add_argument("--use_balanced", action="store_true", help="If set, use class_weight='balanced' for LogisticRegression.")
+    parser.add_argument('--use_balanced', dest='use_balanced', action='store_true',
+                    help='Enable class_weight="balanced" for classifiers (default: ON)')
+    parser.add_argument('--no-balanced', dest='use_balanced', action='store_false',
+                    help='Disable class_weight balancing (overrides default)')
+    parser.set_defaults(use_balanced=True)
     parser.add_argument("--logreg_C", type=float, default=1.0, help="LogisticRegression C (inverse regularization).")
     parser.add_argument("--rf_estimators", type=int, default=200, help="n_estimators for RandomForest used in final fit.")
     args = parser.parse_args()
